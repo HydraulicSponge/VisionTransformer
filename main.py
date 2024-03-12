@@ -1,125 +1,181 @@
-from torch.utils.data import Dataset
-from torchvision import transforms
-from PIL import Image
-import torch
-import os
-import matplotlib.pyplot as plt
-from torchvision.transforms.functional import to_pil_image
-from torch import nn
-from einops.layers.torch import Rearrange
-from torch import Tensor
-from einops import repeat
-from torch.utils.data import DataLoader
-from torch.utils.data import random_split
-import torch.optim as optim
 import numpy as np
-import random
+import pandas as pd
+import os, random, sys
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import torch.nn.functional as F
-from torchvision.transforms import Resize, ToTensor
-
-
-path_train = r"C:\Users\Sarim&Sahar\OneDrive\Desktop\ViTs for DBRP\data\training_data"
-path_test = r"C:\Users\Sarim&Sahar\OneDrive\Desktop\ViTs for DBRP\data\testing_data"
-
-
-class Compose(object):
-    def __init__(self, transforms):
-        self.transforms = transforms
-
-    def __call__(self, image, target):
-        for t in self.transforms:
-            image = t(image)
-        return image, target
-
-classes = ['healthy', 'mild npdr', 'moderate npdr', 'severe npdr', 'pdr']
+from torch.utils.data import DataLoader, Dataset, sampler
+import torchvision.transforms as T
+from sklearn.model_selection import train_test_split
+import torchmetrics
+from torchvision import models
+from PIL import Image
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from torch.utils.data import DataLoader
+from torchvision.datasets import ImageFolder
+from torch.utils.data import random_split
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms 
+from torchvision.transforms.functional import to_pil_image
+torch.cuda.empty_cache()
+path_train = '/kaggle/input/diabetic-retinopathy-resized-arranged'
+classes = ['0', '1', '2', '3', '4']
 
 
 for i in classes:
     class_path = os.path.join(path_train, i)
     num_images = len([file for file in os.listdir(class_path) if file.endswith(('jpg', 'jpeg', 'png'))])
     print(f"class: {i}, num of datapoints: {num_images}")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
+output_dir = '/kaggle/working/'
+
+# Create the output directory if it doesn't exist
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+   
+# set seed
+def set_random_seed(seed: int) -> None:
+    """
+    Sets the seeds at a certain value.
+    :param seed: the value to be set
+    Also, need to add "worker_init_fn=np.random.seed(seed)" in dataloader
+    # https://discuss.pytorch.org/t/determinism-in-pytorch-across-multiple-files/156269
+    # https://stackoverflow.com/questions/65685060/unique-seed-acrossing-multiple-imported-files-with-random-module-python
+    """
+    print(f"Setting seeds: {seed} ...... ")
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic=  True
+   
+def worker_init_fn(worker_id):    
+    '''
+    this function is for dataloader's worker_init_fn
+    '''                                                    
+    np.random.seed(np.random.get_state()[1][0] + worker_id)
+
+set_random_seed(123)
+
+# Define a custom dataset class for loading and preprocessing data
+def make_weights_for_balanced_classes(labels):
+    count = torch.bincount(torch.tensor(labels)).to(device)
+    print('Count:', count.cpu().detach().numpy())
+   
+    weight = 1. / count.cpu().detach().numpy()
+    print('Data sampling weight:', weight)
+    samples_weight = np.array([weight[t] for t in labels])
+    samples_weight = torch.from_numpy(samples_weight)
+
+    return samples_weight
 
 
-from torchvision import transforms
+
+path_val = path_train
+path_test = path_train
+
 
 """
-class CustomDataset(Dataset):
-    def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
-        self.transform = transform
-        self.classes = os.listdir(root_dir)
-        self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
-        
-        # Shuffle image paths
-        self.image_paths = [] 
-        for cls in self.classes:
-            cls_path = os.path.join(root_dir, cls)
-            self.image_paths.extend(glob.glob(os.path.join(cls_path, '*.*')))
-        random.shuffle(self.image_paths) 
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        image = Image.open(img_path)
-
-        if self.transform:
-            image = self.transform(image)
-    
-    # Get class name from path
-        class_name = img_path.split('/')[-2]  
-
-    # Get class index 
-        label = self.class_to_idx[class_name]
-
-        return image, label
+train_dataloader = DataLoader(path_train, batch_size=128, shuffle=True)
+test_dataloader = DataLoader(path_test, batch_size=128, shuffle=False)
 """
-from torchvision.datasets import ImageFolder
-data_transform = transforms.Compose([
-    transforms.Resize((144, 144)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(20),
-    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
-    transforms.ToTensor()
-    ])
+# Create data loaders
+batch_size = 64
+IMAGE_SIZE = 224
+IMAGENET_MEAN = [0.5,0.5,0.5]         # Mean of ImageNet dataset (used for normalization)
+IMAGENET_STD = [0.5,0.5,0.5]          # Std of ImageNet dataset (used for normalization)
 
 
-dataset = ImageFolder(root=path_train, transform=data_transform)
+# T.Compose([
+#     T.RandomResizedCrop(size=IMAGE_SIZE, scale=(0.8, 1.2), ratio=(1, 1)),
+#     T.RandomApply([T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05)], p=0.5),
+#     T.RandomApply([T.RandomVerticalFlip()], p=0.5),
+#     T.RandomRotation(degrees=20),
+#     T.RandomResizedCrop(size=IMAGE_SIZE, scale=(0.8, 1.2), ratio=(1, 1)),
+# ])
+from torch.utils.data import Subset
+from sklearn.model_selection import train_test_split
+#_____________________
+"""
+transform = T.Compose([
+    T.Resize((224,224)),
+    T.ToTensor(),
+])
 
+dataset = datasets.ImageFolder(path_train, transform=transform)
+
+def get_mean_std(loader):
+    # Compute the mean and standard deviation of all pixels in the dataset
+    num_pixels = 0
+    mean = 0.0
+    std = 0.0
+    for images, _ in loader:
+        batch_size, num_channels, height, width = images.shape
+        num_pixels += batch_size * height * width
+        mean += images.mean(axis=(0, 2, 3)).sum()
+        std += images.std(axis=(0, 2, 3)).sum()
+
+    mean /= num_pixels
+    std /= num_pixels
+
+    return mean, std
+
+
+loader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+mean, std = get_mean_std(loader)
+print(mean, std)
+"""
+#_____________________________
+train_transform = T.Compose([
+    T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    T.RandomAffine(degrees=20, translate=(0, 0), scale=(0.8, 1.2), shear=0),
+    T.RandomHorizontalFlip(p=0.5),
+    T.RandomApply([T.RandomVerticalFlip()], p=0.5),
+    T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    T.ToTensor(),
+    #T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+])
+
+test_transform = T.Compose([
+    T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    T.ToTensor(),
+    #T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+])
+
+dataset = ImageFolder(path_train, transform=train_transform)
+dataset_test = ImageFolder(path_train, transform=test_transform)
+targets = dataset.targets
+                
+train_idx, valid_idx= train_test_split(
+np.arange(len(targets)),
+test_size=0.2,
+shuffle=True,
+stratify=targets)
+
+train_dataset = Subset(dataset, train_idx)#to_list()
+val_dataset = Subset(dataset_test, valid_idx)
+test_dataset = Subset(dataset_test, valid_idx)
+train_dataset, val_dataset, test_dataset = train_dataset.dataset, val_dataset.dataset, test_dataset.dataset
 import matplotlib.pyplot as plt
 import random
 
-num_rows = 5
-num_cols = 5
 
 
-fig, axs = plt.subplots(num_rows, num_cols, figsize=(10, 10))
-to_pil = transforms.ToPILImage() 
-
-for i in range(num_rows):
-    for j in range(num_cols):
-
-        image_index = random.randrange(len(dataset))
-
-        axs[i, j].imshow(dataset[image_index][0].permute((1, 2, 0)))
-
-
-        axs[i, j].set_title(dataset.classes[dataset[image_index][1]], color="black")
-        image, label = dataset[image_index]
-        pil_image = to_pil(image)
-
-        axs[i, j].axis(False)
-        axs[i, j].imshow(pil_image)
-
-
-fig.suptitle(f"Random {num_rows * num_cols} images from the training dataset", fontsize=16, color="blue")
-
-fig.set_facecolor(color='white')
-
-plt.show()
-
-"""
+label_mapping = {
+    0: "healthy",
+    1: "mild npdr",
+    2: "moderate npdr",
+    3: "severe npdr",
+    4: "pdr"
+}
 def show_images(dataset, num_samples=20, cols=4):
     # Get a random subset of indices
     random_dataset = random.sample(list(range(len(dataset))), num_samples)
@@ -131,273 +187,262 @@ def show_images(dataset, num_samples=20, cols=4):
         plt.colorbar()
         plt.title(label_mapping[target])
         plt.axis('on')
+        plt.suptitle(f"Random {num_samples} images from the training dataset", fontsize=16, color="black")
 
     plt.show()
 
-show_images(dataset)"""
-
-class PatchEmbedding(nn.Module):
-    def __init__(self, in_channels=3, patch_size=8, emb_size=256):
-        self.patch_size = patch_size
-        super().__init__()
-        self.projection = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_size, p2=patch_size),
-            nn.Linear((patch_size **  2) * in_channels, emb_size)
-        )
-
-        # Initialize the linear layer weights randomly
-        nn.init.xavier_uniform_(self.projection[1].weight)
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.projection(x)
-        return x
+show_images(dataset)
 
 
-label_mapping = {
-    0: "healthy",
-    1: "mild npdr",
-    2: "moderate npdr",
-    3: "severe npdr",
-    4: "pdr"
-}
+# For unbalanced dataset we create a weighted sampler                      
+weights = make_weights_for_balanced_classes(train_dataset.targets)
+weighted_sampler = sampler.WeightedRandomSampler(weights, len(weights))
 
-
-    
-class Attention(nn.Module):
-    def __init__(self, dim, n_heads, dropout):
-        super().__init__()
-        self.n_heads = n_heads
-        self.att = torch.nn.MultiheadAttention(embed_dim=dim, num_heads=n_heads, dropout=0.1)
-        self.q = torch.nn.Linear(dim, dim)
-        self.k = torch.nn.Linear(dim, dim)
-        self.v = torch.nn.Linear(dim, dim)
-        self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(dim)
-
-    def forward(self, x):
-        q = self.q(x)
-        k = self.k(x)
-        v = self.v(x)
-        attn_output, attn_output_weights = self.att(q, k, v)
-        attn_output = self.norm(self.dropout(attn_output) + x)
-        return attn_output
-
-Attention(dim=256, n_heads=4, dropout=0.1)(torch.ones((1, 5, 256))).shape
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, pin_memory=True,
+                        num_workers=2, worker_init_fn=worker_init_fn , sampler=weighted_sampler)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=2)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=2)
 
 
 
-sample_datapoint = torch.unsqueeze(dataset[0][0], 0)
-print("Initial shape: ", sample_datapoint.shape) 
-embedding = PatchEmbedding()(sample_datapoint)
-print("Patches shape: ", embedding.shape)
+# Training loop
+
+best_test_acc = 0
+best_epoch = 0
+num_classes = 5
+train_losses = []  # To store training losses
+val_losses = []    # To store validation losses
+train_accuracies = []  # To store training accuracies
+val_accuracies = []    # To store validation accuracies
+logs = ''
 
 
+# Define the model architecture (ResNet-50 as an example)
+print("Model: ViT")
+model = models.vit_b_16(weights='IMAGENET1K_V1')
 
+#hidden_layer_size = 512
+#num_ftrs = model.fc.in_features
+model.heads = nn.Sequential(
+   # nn.Linear(num_ftrs, hidden_layer_size),
+    #nn.ReLU(),
+    # nn.BatchNorm1d(hidden_layer_size),
+    #nn.Dropout(0.2),
+    nn.Linear(in_features=768, out_features=5, bias=True)
+    #nn.Linear(hidden_layer_size, num_classes)
+)
+#model.load_state_dict(torch.load(r'C:\Users\Sarim&Sahar\OneDrive\Desktop\Science Fair ViT\save_data.pth'), strict=False)
+model = model.to(device)
 
-class PreNorm(nn.Module):
-    def __init__(self, dim, fn):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.fn = fn
-    def forward(self, x, **kwargs):
-        return self.fn(self.norm(x), **kwargs)
-    
-norm = PreNorm(256, Attention(dim=256, n_heads=4, dropout=0.1))
-norm(torch.ones((1, 5, 256))).shape
-
-#==
-
-class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.1):
-        super().__init__()
-        self.linear1 = nn.Linear(dim, hidden_dim)
-        self.activation = nn.GELU()
-        self.dropout1 = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(hidden_dim, dim)
-        self.dropout2 = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(dim)
+class Temperature(nn.Module):
+    def __init__(self, init_weight):
+        super(Temperature, self).__init__()
+        self.T = nn.Parameter(init_weight)
 
     def forward(self, x):
-        x = self.norm(self.dropout2(self.linear2(self.dropout1(self.activation(self.linear1(x)))) + x))
-        return x
+        return x / torch.exp(self.T)
 
-ff = FeedForward(dim=256, hidden_dim=512)
-ff(torch.ones((1, 5, 256))).shape
+# Define loss function and optimizer
+count = torch.bincount(torch.tensor(train_dataset.targets)).to(device)
+class_weight = len(train_dataset.targets) / count # (count*num_classes)
 
-class ResidualAdd(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
+print('Loss class weight:', class_weight)
+class_weight = None
+criterion = nn.CrossEntropyLoss(weight=class_weight).to(device)
+params = list(model.parameters())
+optimizer = optim.SGD(params, lr=1e-4, weight_decay=1e-5)#, eps=1e-8)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=4, mode='min')
 
-    def forward(self, x, **kwargs):
-        res = x
-        x = self.fn(x, **kwargs)
-        x += res
-        return x
+accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, average='weighted').to(device)
+confmat = torchmetrics.ConfusionMatrix(task="multiclass", num_classes=num_classes, normalize='true').to(device)
+class_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, average=None).to(device)
+num_epochs = 15
 
-residual_att = ResidualAdd(Attention(dim=256, n_heads=4, dropout=0.1))
-residual_att(torch.ones((1, 5, 256))).shape
-import math
-class PositionalEncoding(nn.Module):
-    def __init__(self, emb_size, max_len=5000):
-        super().__init__()
-        pe = torch.zeros(max_len, emb_size)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, emb_size, 2).float() * (-math.log(10000.0) / emb_size))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1)].detach()
-class ModelArgs:
-    dim: int = 256         
-    hidden_dim: int = 512  
-    n_heads: int = 8        
-    n_layers: int = 6       
-    patch_size: int = 8     
-    n_channels: int = 3     
-    n_patches: int = 1024  
-    n_classes: int = 5   
-    dropout: float = 0.2
-    in_channels: int=3   
-class ViT(nn.Module):
-    def __init__(self, args):
-        super(ViT, self).__init__()
-        self.patch_size = args.patch_size
-        self.in_channels = args.in_channels
-        self.hidden_dim = args.hidden_dim
-        self.dim = args.dim
-        self.n_classes = args.n_classes
-        self.dropout = args.dropout
-        self.n_heads = args.n_heads
-        self.n_layers = args.n_layers
-        self.n_patches = args.n_patches
-
-        self.patch_embed = PatchEmbedding(in_channels=self.in_channels, patch_size=self.patch_size, emb_size=self.dim)
-        self.pos_encoding = PositionalEncoding(emb_size=self.dim)
-        self.cls_token = nn.Parameter(torch.randn(1, 1, self.dim))
-        self.transformer = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=self.dim, nhead=self.n_heads, dim_feedforward=self.hidden_dim, dropout=self.dropout), num_layers=self.n_layers)
-        self.mlp_head = nn.Sequential(
-            nn.LayerNorm(self.dim),
-            nn.Linear(self.dim, self.n_classes)
-        )
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-        assert h == w, 'Input tensor shape must be square'
-
-        x = self.patch_embed(x)
-        x = x.permute(1, 0, 2)  
-        cls_token = self.cls_token.expand(-1, b, -1)
-        x = torch.cat((cls_token, x), dim=0)
-        x = self.pos_encoding(x)
-
-        x = self.transformer(x)
-
-        cls_token_final = x[0]
-
-
-        x = self.mlp_head(cls_token_final)
-
-        return x
-
-
-device = "cpu"
-model = ViT(args=ModelArgs()).to(device)
-model(torch.ones((1, 3, 144, 144)))
-
-test_dataset = ImageFolder(root=path_test, transform=data_transform)
-
-train_dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
-test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-correct_predictions = 0
-total_samples = 0
-
-optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-2)
-
-criterion = nn.CrossEntropyLoss()
-from torch.utils.data import SubsetRandomSampler
-
-
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-train_subset_sampler = SubsetRandomSampler(range(100))
-test_subset_sampler = SubsetRandomSampler(range(100))
-
-#subset_train_dataloader = DataLoader(dataset, batch_size=32, sampler=train_subset_sampler)
-#subset_test_dataloader = DataLoader(test_dataset, batch_size=32, sampler=test_subset_sampler)
-lr = []
-num_params = count_parameters(model)
-print(f"Number of parameters in the model: {num_params}")
-from pytorchtools import EarlyStopping
-scheduler =torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=3, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0.00000001, eps=1e-06, verbose=1)
-earlystopping = EarlyStopping(patience=3, verbose=True)
-num_epochs = 1
-for epoch in range(num_epochs):  
-    train_losses = []
-    train_correct_predictions = 0
-    train_total_samples = 0
-    
-    # Training phase
+#TRAINING
+for epoch in range(num_epochs):
+    t = tqdm(enumerate(train_loader, 0), total=len(train_loader),
+                smoothing=0.9, position=0, leave=True,
+                desc="Train: Epoch: "+str(epoch+1)+"/"+str(num_epochs))
     model.train()
-    for step, (inputs, labels) in enumerate(train_dataloader):
+    running_loss = 0.0
+   
+    for i, (inputs, labels) in t:
+        inputs, labels = inputs.to(device).float(),labels.to(device).long()
         optimizer.zero_grad()
-        inputs, labels = inputs.to(device), labels.to(device)
         outputs = model(inputs)
-
-        loss = criterion(outputs, labels)
+        loss = F.cross_entropy(outputs, labels, weight=class_weight)
+        criterion(outputs, labels)
         loss.backward()
         optimizer.step()
-        train_losses.append(loss.item())
-        
+        running_loss += loss.item()
+        outputs = F.softmax(outputs, dim=-1)
+        train_accuracy = accuracy(outputs, labels)
+   
+    train_loss = running_loss / len(train_loader)
+    train_losses.append(train_loss)
+   
+    train_accuracy = accuracy.compute()
+    train_accuracies.append(float(train_accuracy))
+    accuracy.reset()
+   
 
-        _, predicted = torch.max(outputs, 1)
-        train_correct_predictions += torch.sum(predicted == labels).item()
-        train_total_samples += labels.size(0)
-
-    train_accuracy = train_correct_predictions / train_total_samples
-
+    # Validation
     model.eval()
-    test_losses = []
-    test_correct_predictions = 0
-    test_total_samples = 0
-    
+    val_correct = 0
+    val_loss = 0.0
+   
     with torch.no_grad():
-        for step, (inputs, labels) in enumerate(test_dataloader):
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-
+        t = tqdm(enumerate(val_loader, 0), total=len(val_loader),
+                smoothing=0.9, position=0, leave=True,
+                desc="Val: Epoch: "+str(epoch+1)+"/"+str(num_epochs))
+        for i, (inputs, labels) in t:
+            inputs = inputs.to(device).float()
+            labels = labels.to(device).long()
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            test_losses.append(loss.item())
-            
-            #_, predicted = torch.max(outputs, 1)
-            test_correct_predictions += torch.sum(predicted == labels).item()
-            test_total_samples += labels.size(0)
+            loss = F.cross_entropy(outputs, labels, weight=class_weight)
+            criterion(outputs, labels)
+            val_loss += loss.item()
+            outputs = F.softmax(outputs, dim=-1)
+            val_accuracy = accuracy(outputs, labels)
+            confmat.update(outputs, labels)
+            val_class_accuracy = class_accuracy(outputs, labels)
+           
+   
+    val_class_accuracy = class_accuracy.compute()  
+    # class_weight = torch.tensor(
+    #     [1.0 / ((acc.item() + 1e-5) * cls_count.item()) for acc, cls_count in zip(val_class_accuracy, torch.bincount(torch.tensor(test_dataset.labels)))]
+    # ).to(device)  
+   
+    # Exponential decay for updating class weights based on accuracy
+    # accuracy_weights = 0.1 * (1.0 / (val_class_accuracy+1e-5)) + (1 - 0.1) * torch.ones(num_classes).to(device)
+    # # Exponential decay for updating class weights based on frequency
+    # frequency_weights = 0.1 * (1.0 / count) + (1 - 0.1) * torch.ones(num_classes).to(device)
+    # # Combine accuracy and frequency weights
+    # class_weight = 0.1 * (accuracy_weights * frequency_weights).to(device) + (1-0.1)*class_weight
+    # class_weight = class_weight.to(device)
+    # class_weight=None
+   
+    # print(class_weight)
+    # logs+=f'Class loss weight: {list(class_weight.cpu().detach().numpy())}\n'    
 
-    test_accuracy = test_correct_predictions / test_total_samples
-    
-    print(f">>> Epoch {epoch+1} train loss: {np.mean(train_losses)} train accuracy: {train_accuracy}")
-    print(f">>> Epoch {epoch+1} test loss: {np.mean(test_losses)} test accuracy: {test_accuracy}")
+    val_loss = val_loss / len(val_loader)
+    val_losses.append(val_loss)
+    val_accuracy = accuracy.compute()
+    val_accuracies.append(float(val_accuracy))
+
+    test_loss = val_loss # test_loss / len(test_loader)
+   
+    # Calculate metrics for test data
+    test_accuracy = val_accuracy
+   
+    # scheduler
+    scheduler.step(val_loss)
+    lr_log = f"LR: {optimizer.param_groups[0]['lr']}" # scheduler._last_lr
+    print(lr_log)
+    logs+=lr_log+'\n'
+   
+    # Print and log epoch results
+    train_results = f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss}, Training Accuracy: {train_accuracy}, Validation Loss: {val_loss}, Validation Accuracy: {val_accuracy}"
+    print(train_results)
+    test_results = f"Test Accuracy: {test_accuracy}, Test Loss: {test_loss}"
+    print(test_results)
+    logs+=train_results+'\n'+test_results+'\n'
+    # print(confmat.compute())
+   
+    # Save the model checkpoint
+    torch.save(model.state_dict(), os.path.join(output_dir, f'last.pth'))
+   
+    if (epoch+1)%5==0:
+        torch.save(model.state_dict(), os.path.join(output_dir, f'epoch{epoch+1}.pth'))
+
+        # fig, ax = confmat.plot()
+        fig, ax = plt.subplots()
+        confmat_vals = np.around(confmat.compute().cpu().detach().numpy(), 3)
+        im = ax.imshow(confmat_vals)
+
+        # Show all ticks and label them with the respective list entries
+        ax.set_xticks(np.arange(num_classes))
+        ax.set_yticks(np.arange(num_classes))
+        ax.set_xlabel('Predicted class')
+        ax.set_ylabel('True class')
+
+        # Loop over data dimensions and create text annotations.
+        for i in range(num_classes):
+            for j in range(num_classes):
+                text = ax.text(j, i, confmat_vals[i, j],ha="center", va="center", color="black", fontsize=12)
+
+        ax.set_title(f"Confusion Matrix on Test for epoch {epoch+1}")
+        fig.savefig(os.path.join(output_dir, f"conf_mat_epoch{epoch+1}.png"))
+        plt.close()
+       
+        # class_weight = 0.3 * (1.0 / (val_class_accuracy+1e-5)) + (1-0.3)*class_weight
+        # print(class_weight)
+        # logs+=f'Class loss weight: {list(class_weight.cpu().detach().numpy())}\n'  
+   
+    if best_test_acc <= test_accuracy and epoch!=0:
+        best_epoch = epoch+1
+        log = f"Improve accuracy from {best_test_acc} to {test_accuracy}"
+        print(log)
+        logs+=log+"\n"
+        best_test_acc = test_accuracy
+        torch.save(model.state_dict(), os.path.join(output_dir, f'best.pth'))
+
+        # fig, ax = confmat.plot()
+        fig, ax = plt.subplots()
+        confmat_vals = np.around(confmat.compute().cpu().detach().numpy(), 3)
+        im = ax.imshow(confmat_vals)
+
+        # Show all ticks and label them with the respective list entries
+        ax.set_xticks(np.arange(num_classes))
+        ax.set_yticks(np.arange(num_classes))
+        ax.set_xlabel('Predicted class')
+        ax.set_ylabel('True class')
+
+        # Loop over data dimensions and create text annotations.
+        for i in range(num_classes):
+            for j in range(num_classes):
+                text = ax.text(j, i, confmat_vals[i, j],ha="center", va="center", color="black", fontsize=12)
+
+        ax.set_title("Confusion Matrix on Test for best model")
+        fig.savefig(os.path.join(output_dir, "conf_mat_best.png"))
+        plt.close()
+   
+    # resetting all metrics
+    accuracy.reset(); class_accuracy.reset(); confmat.reset()
+   
+
+# Save the printed outputs to a log.txt file
+with open(os.path.join(output_dir, 'log.txt'), 'w') as log_file:
+    log_file.write(logs)
+    log_file.write(f'Best test accuracy: {best_test_acc} in epoch {best_epoch}')
+
+# Save the loss and accuracy graphs
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.plot(range(1, num_epochs+1), train_losses, label='Train Loss')
+plt.plot(range(1, num_epochs+1), val_losses, label='Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.title('Train and Validation Loss')
+
+plt.subplot(1, 2, 2)
+plt.plot(range(1, num_epochs+1), train_accuracies, label='Train Accuracy')
+plt.plot(range(1, num_epochs+1), val_accuracies, label='Validation Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.title('Train and Validation Accuracy')
+
+plt.savefig(os.path.join(output_dir, 'loss_accuracy_graph.png'))
+plt.close()
 
 
-    test_loss_avg = np.mean(test_losses)
-    earlystopping(test_loss_avg, model)
-    scheduler.step(np.mean(test_losses))
-    if earlystopping.early_stop:
-        print("Early stopping")
-        break
-
-
-    scheduler.step(np.mean(test_losses))
-    print('epoch={}, learning rate={:.4f}'.format(epoch + 1, optimizer.state_dict()['param_groups'][0]['lr']))
-    lr.append(optimizer.state_dict()['param_groups'][0]['lr'])
-
+print("DR classifier model completed")
+print("Model saved location :", output_dir)
 
 model.eval()
-inputs, labels = next(iter(test_dataloader))
+inputs, labels = next(iter(test_loader))
 inputs, labels = inputs.to(device), labels.to(device)
 outputs = model(inputs)
 print(outputs)
