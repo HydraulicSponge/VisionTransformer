@@ -23,9 +23,11 @@ import torchvision.models as models
 import torch.onnx
 from torch.utils.data import Subset
 from sklearn.model_selection import train_test_split
-
+from google.colab import drive
+drive.mount('/content/drive')
 torch.cuda.empty_cache()
-path_train = '/kaggle/input/diabetic-retinopathy-resized-arranged'
+path_train = r'/content/drive/MyDrive/Colab Notebooks/Science Fair ViT/data/training_data'
+"""
 classes = ['0', '1', '2', '3', '4']
 
 
@@ -33,14 +35,16 @@ for i in classes:
     class_path = os.path.join(path_train, i)
     num_images = len([file for file in os.listdir(class_path) if file.endswith(('jpg', 'jpeg', 'png'))])
     print(f"class: {i}, num of datapoints: {num_images}")
+"""
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 print(device)
-output_dir = '/kaggle/working/'
+output_dir = r'/content/drive/MyDrive/Colab Notebooks/Science Fair ViT/output_dir'
 
 
 if not os.path.exists(output_dir):
     os.makedirs(output_dir, exist_ok=True)
-   
+
 def set_random_seed(seed: int) -> None:
 
     print(f"Setting seeds: {seed} ...... ")
@@ -53,9 +57,9 @@ def set_random_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic=  True
-   
-def worker_init_fn(worker_id):    
-                                                 
+
+def worker_init_fn(worker_id):
+
     np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 set_random_seed(123)
@@ -63,7 +67,7 @@ set_random_seed(123)
 def make_weights_for_balanced_classes(labels):
     count = torch.bincount(torch.tensor(labels)).to(device)
     print('Count:', count.cpu().detach().numpy())
-   
+
     weight = 1. / count.cpu().detach().numpy()
     print('Data sampling weight:', weight)
     samples_weight = np.array([weight[t] for t in labels])
@@ -78,7 +82,7 @@ path_test = path_train
 
 
 
-batch_size = 32
+batch_size = 64
 IMAGE_SIZE = 224
 IMAGENET_MEAN = [0.485, 0.456, 0.406]         # Mean of ImageNet dataset (used for normalization)
 IMAGENET_STD = [0.229, 0.224, 0.225]         # Std of ImageNet dataset (used for normalization)
@@ -104,7 +108,7 @@ test_transform = T.Compose([
 dataset = ImageFolder(path_train, transform=train_transform)
 dataset_test = ImageFolder(path_train, transform=test_transform)
 targets = dataset.targets
-               
+
 train_idx, valid_idx= train_test_split(
 np.arange(len(targets)),
 test_size=0.2,
@@ -144,14 +148,14 @@ def show_images(dataset, num_samples=20, cols=4):
 show_images(dataset)
 
 
-                   
+
 weights = make_weights_for_balanced_classes(train_dataset.targets)
 weighted_sampler = sampler.WeightedRandomSampler(weights, len(weights))
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, pin_memory=True,
-                        num_workers=2, worker_init_fn=worker_init_fn , sampler=weighted_sampler)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=2)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=2)
+                        num_workers=32, worker_init_fn=worker_init_fn , sampler=weighted_sampler)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=32)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=32)
 
 
 
@@ -159,10 +163,10 @@ val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_m
 best_test_acc = 0
 best_epoch = 0
 num_classes = 5
-train_losses = []  
-val_losses = []  
+train_losses = []
+val_losses = []
 train_accuracies = []
-val_accuracies = []  
+val_accuracies = []
 logs = ''
 
 
@@ -214,14 +218,14 @@ num_params = count_parameters(model)
 print(f"Number of parameters in the model: {num_params}")
 
 #TRAINING
-num_epochs = 12
+num_epochs = 32
 for epoch in range(num_epochs):
     t = tqdm(enumerate(train_loader, 0), total=len(train_loader),
                 smoothing=0.9, position=0, leave=True,
                 desc="Train: Epoch: "+str(epoch+1)+"/"+str(num_epochs))
     model.train()
     running_loss = 0.0
-   
+
     for i, (inputs, labels) in t:
         inputs, labels = inputs.to(device).float(),labels.to(device).long()
         optimizer.zero_grad()
@@ -233,20 +237,20 @@ for epoch in range(num_epochs):
         running_loss += loss.item()
         outputs = F.softmax(outputs, dim=-1)
         train_accuracy = accuracy(outputs, labels)
-   
+
     train_loss = running_loss / len(train_loader)
     train_losses.append(train_loss)
-   
+
     train_accuracy = accuracy.compute()
     train_accuracies.append(float(train_accuracy))
     accuracy.reset()
-   
+
 
     # Validation
     model.eval()
     val_correct = 0
     val_loss = 0.0
-   
+
     with torch.no_grad():
         t = tqdm(enumerate(val_loader, 0), total=len(val_loader),
                 smoothing=0.9, position=0, leave=True,
@@ -262,17 +266,17 @@ for epoch in range(num_epochs):
             val_accuracy = accuracy(outputs, labels)
             confmat.update(outputs, labels)
             val_class_accuracy = class_accuracy(outputs, labels)
-           
-   
-    val_class_accuracy = class_accuracy.compute()  
- 
+
+
+    val_class_accuracy = class_accuracy.compute()
+
     val_loss = val_loss / len(val_loader)
     val_losses.append(val_loss)
     val_accuracy = accuracy.compute()
     val_accuracies.append(float(val_accuracy))
 
     test_loss = val_loss
-   
+
 
     test_accuracy = val_accuracy
 
@@ -280,16 +284,16 @@ for epoch in range(num_epochs):
     lr_log = f"LR: {optimizer.param_groups[0]['lr']}" # scheduler._last_lr
     print(lr_log)
     logs+=lr_log+'\n'
- 
+
     train_results = f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss}, Training Accuracy: {train_accuracy}, Validation Loss: {val_loss}, Validation Accuracy: {val_accuracy}"
     print(train_results)
     logs+=train_results+'\n'
     torch.save(model.state_dict(), os.path.join(output_dir, f'last.pth')) #Save model checkpoint
-   
+
     if (epoch+1)%5==0:
         torch.save(model.state_dict(), os.path.join(output_dir, f'epoch{epoch+1}.pth'))
 
-     
+
         fig, ax = plt.subplots()
         confmat_vals = np.around(confmat.compute().cpu().detach().numpy(), 3)
         im = ax.imshow(confmat_vals)
@@ -299,7 +303,7 @@ for epoch in range(num_epochs):
         ax.set_xlabel('Predicted class')
         ax.set_ylabel('True class')
 
-     
+
         for i in range(num_classes):
             for j in range(num_classes):
                 text = ax.text(j, i, confmat_vals[i, j],ha="center", va="center", color="black", fontsize=12)
@@ -307,8 +311,8 @@ for epoch in range(num_epochs):
         ax.set_title(f"Confusion Matrix on Test for epoch {epoch+1}")
         fig.savefig(os.path.join(output_dir, f"conf_mat_epoch{epoch+1}.png"))
         plt.close()
-     
-   
+
+
     if best_test_acc <= test_accuracy and epoch!=0:
         best_epoch = epoch+1
         log = f"Improve accuracy from {best_test_acc} to {test_accuracy}"
@@ -316,8 +320,8 @@ for epoch in range(num_epochs):
         logs+=log+"\n"
         best_test_acc = test_accuracy
         torch.save(model.state_dict(), os.path.join(output_dir, f'best.pth'))
-       
-   
+
+
         fig, ax = plt.subplots()
         confmat_vals = np.around(confmat.compute().cpu().detach().numpy(), 3)
         im = ax.imshow(confmat_vals)
@@ -336,10 +340,10 @@ for epoch in range(num_epochs):
         ax.set_title("Confusion Matrix on Test for best model")
         fig.savefig(os.path.join(output_dir, "conf_mat_best.png"))
         plt.close()
-   
- 
+
+
     accuracy.reset(); class_accuracy.reset(); confmat.reset()
-   
+
 
 #Save the printed outputs to a log.txt file
 with open(os.path.join(output_dir, 'log.txt'), 'w') as log_file:
@@ -382,7 +386,7 @@ with torch.no_grad():
     for x, y in test_loader:
         x,y = x.to(device), y.to(device)
         pred = model(x)
- 
+
         loss = criterion(pred, y)
 
         test_loss += loss.item()
@@ -391,7 +395,7 @@ with torch.no_grad():
 
     test_loss /= len(test_loader)
     test_acc /= len(test_loader)
-print(f'Test Accuracy: {test_acc}, Test Loss: {test_loss}')    
+print(f'Test Accuracy: {test_acc}, Test Loss: {test_loss}')
 
 
 
