@@ -23,10 +23,11 @@ import torchvision.models as models
 import torch.onnx
 from torch.utils.data import Subset
 from sklearn.model_selection import train_test_split
-from google.colab import drive
-drive.mount('/content/drive')
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 torch.cuda.empty_cache()
-path_train = r'/content/drive/MyDrive/Colab Notebooks/Science Fair ViT/data/training_data'
+path_train = '/kaggle/input/diabetic-retinopathy-resized-arranged'
+# path_val = '/kaggle/input/gaussianvalidation/Gaussianfiltered'
 """
 classes = ['0', '1', '2', '3', '4']
 
@@ -36,17 +37,17 @@ for i in classes:
     num_images = len([file for file in os.listdir(class_path) if file.endswith(('jpg', 'jpeg', 'png'))])
     print(f"class: {i}, num of datapoints: {num_images}")
 """
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print(device)
-output_dir = r'/content/drive/MyDrive/Colab Notebooks/Science Fair ViT/output_dir'
+output_dir = '/kaggle/working/'
 
 
 if not os.path.exists(output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
 def set_random_seed(seed: int) -> None:
-
     print(f"Setting seeds: {seed} ...... ")
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -65,7 +66,7 @@ def worker_init_fn(worker_id):
 set_random_seed(123)
 
 def make_weights_for_balanced_classes(labels):
-    count = torch.bincount(torch.tensor(labels)).to(device)
+    count = torch.bincount(labels).to(device)
     print('Count:', count.cpu().detach().numpy())
 
     weight = 1. / count.cpu().detach().numpy()
@@ -76,8 +77,6 @@ def make_weights_for_balanced_classes(labels):
     return samples_weight
 
 
-
-path_val = path_train
 path_test = path_train
 
 
@@ -86,42 +85,78 @@ batch_size = 64
 IMAGE_SIZE = 224
 IMAGENET_MEAN = [0.485, 0.456, 0.406]         # Mean of ImageNet dataset (used for normalization)
 IMAGENET_STD = [0.229, 0.224, 0.225]         # Std of ImageNet dataset (used for normalization)
+"""
+train_transform = A.Compose(
 
-
+    [
+        A.SmallestMaxSize(max_size=224),
+        A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=15, p=0.5),
+        A.RGBShift(r_shift_limit=15, g_shift_limit=15, b_shift_limit=15, p=0.5),
+        A.RandomBrightnessContrast(p=0.5),
+        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ToTensorV2(),
+    ]
+)
+"""
 
 train_transform = T.Compose([
     T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    T.RandomAffine(degrees=20, translate=(0, 0), scale=(0.8, 1.2), shear=0),
-    T.RandomHorizontalFlip(p=0.5),
-    T.RandomApply([T.RandomVerticalFlip()], p=0.5),
-    T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    T.RandomAffine(degrees=15, translate=(0.05, 0.05), scale=(0.95, 1.05)),
+    T.ColorJitter(brightness=0.5, contrast=0.5),
     T.ToTensor(),
-    T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
+
 
 test_transform = T.Compose([
     T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     T.ToTensor(),
     T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
 ])
-
-dataset = ImageFolder(path_train, transform=train_transform)
+"""
+val_transform = A.Compose(
+    [
+        A.SmallestMaxSize(max_size=224),
+        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ToTensorV2(),
+    ]
+)
+"""
+all_dataset = ImageFolder(path_train, transform=train_transform)
+#plt.imshow(all_dataset[0][0].permute(1, 2, 0))
 dataset_test = ImageFolder(path_train, transform=test_transform)
-targets = dataset.targets
+#plt.imshow(dataset_test[0][0].permute(1, 2, 0))
+targets = all_dataset.targets
 
-train_idx, valid_idx= train_test_split(
+train_idx, test_idx = train_test_split(
 np.arange(len(targets)),
 test_size=0.2,
 shuffle=True,
 stratify=targets)
+print(len(train_idx), len(test_idx))
 
-train_dataset = Subset(dataset, train_idx)#to_list()
-val_dataset = Subset(dataset_test, valid_idx)
-test_dataset = Subset(dataset_test, valid_idx)
-train_dataset, val_dataset, test_dataset = train_dataset.dataset, val_dataset.dataset, test_dataset.dataset
+train_dataset = Subset(all_dataset, train_idx)#to_list()
+val_dataset = Subset(dataset_test, test_idx)
+test_dataset = Subset(dataset_test, test_idx)
+#train_dataset, val_dataset, test_dataset = train_dataset.dataset, val_dataset.dataset, test_dataset.dataset
+"""
+import torchshow as ts
+path_train_img = '/kaggle/input/diabetic-retinopathy-resized-arranged/0/10003_left.jpeg'
+ts.show(path_train_img)
+"""
 import matplotlib.pyplot as plt
 import random
 
+# print(all_dataset.targets)
+labels =  torch.tensor(all_dataset.targets)[train_dataset.indices]
+count = torch.bincount(labels).to(device)
+print('Train Count:', count.cpu().detach().numpy())
+
+labels = torch.tensor(all_dataset.targets)[test_dataset.indices]
+count = torch.bincount(labels).to(device)
+print('Test Count:', count.cpu().detach().numpy())
+# sys.exit()
+import torchvision
 
 label_mapping = {
     0: "healthy",
@@ -130,32 +165,40 @@ label_mapping = {
     3: "severe npdr",
     4: "pdr"
 }
-def show_images(dataset, num_samples=20, cols=4):
+def inverse_normalize(tensor, mean, std):
+    '''
+    does not work for batch of images, only works on single image 
+    tensor shape: (1, nc, h, w)
+    '''
+    for t, m, s in zip(tensor, mean, std):
+        t.mul_(s).add_(m)
+    return tensor
 
-    random_dataset = random.sample(list(range(len(dataset))), num_samples)
-    plt.figure(figsize=(15, 15))
-    for i, idx in enumerate(random_dataset):
-        image, target = dataset[idx]
-        plt.subplot(int(num_samples/cols) + 1, cols, i + 1)
-        plt.imshow(to_pil_image(image[0]))
-        plt.colorbar()
-        plt.title(label_mapping[target])
-        plt.axis('on')
-        plt.suptitle(f"Random {num_samples} images from the training dataset", fontsize=16, color="black")
-
+def imshow(img):
+    img = img / 2 + 0.5
+    inverse_normalize(img, IMAGENET_MEAN, IMAGENET_STD)
+    npimg = img.numpy()
+    plt.imshow(np.transpose(npimg, (1, 2, 0)))
     plt.show()
 
-show_images(dataset)
+# Get a batch of images
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+# Get a batch of images
+images, labels = next(iter(train_loader))
+
+# Plot random images from the batch
+imshow(torchvision.utils.make_grid(images))
 
 
 
-weights = make_weights_for_balanced_classes(train_dataset.targets)
+weights = make_weights_for_balanced_classes(torch.tensor(all_dataset.targets)[train_dataset.indices])
 weighted_sampler = sampler.WeightedRandomSampler(weights, len(weights))
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, pin_memory=True,
-                        num_workers=32, worker_init_fn=worker_init_fn , sampler=weighted_sampler)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=32)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=32)
+                        num_workers=4, worker_init_fn=worker_init_fn , sampler=weighted_sampler)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
 
 
 
@@ -187,24 +230,20 @@ model.heads = nn.Sequential(
 )
 
 model = model.to(device)
+print(model)
 
-class Temperature(nn.Module):
-    def __init__(self, init_weight):
-        super(Temperature, self).__init__()
-        self.T = nn.Parameter(init_weight)
-
-    def forward(self, x):
-        return x / torch.exp(self.T)
-
-
+"""
 count = torch.bincount(torch.tensor(train_dataset.targets)).to(device)
 class_weight = len(train_dataset.targets) / count
 
 print('Loss class weight:', class_weight)
-criterion = torch.nn.CrossEntropyLoss(weight=class_weight).to(device)
+"""
+criterion = nn.CrossEntropyLoss().to(device)
 params = list(model.parameters())
-optimizer = optim.SGD(params, lr=0.0001, weight_decay=1e-4)#, eps=1e-8)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=4, mode='min')
+#optimizer = optim.SGD(params, lr=1e-3, weight_decay=1e-6, momentum=0.9)#, eps=1e-8)
+optimizer = optim.RAdam(model.parameters(), lr=3e-4, weight_decay = 1e-4)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.7)
+#scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=4, mode='min')
 
 accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, average='weighted').to(device)
 confmat = torchmetrics.ConfusionMatrix(task="multiclass", num_classes=num_classes, normalize='true').to(device)
@@ -215,10 +254,10 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 num_params = count_parameters(model)
-print(f"Number of parameters in the model: {num_params}")
+print(f"Number of trainable parameters in the model: {num_params}")
 
 #TRAINING
-num_epochs = 32
+num_epochs = 43
 for epoch in range(num_epochs):
     t = tqdm(enumerate(train_loader, 0), total=len(train_loader),
                 smoothing=0.9, position=0, leave=True,
@@ -230,14 +269,16 @@ for epoch in range(num_epochs):
         inputs, labels = inputs.to(device).float(),labels.to(device).long()
         optimizer.zero_grad()
         outputs = model(inputs)
-        loss = F.cross_entropy(outputs, labels, weight=class_weight)
+        loss = F.cross_entropy(outputs, labels)
         criterion(outputs, labels)
         loss.backward()
         optimizer.step()
         running_loss += loss.item()
         outputs = F.softmax(outputs, dim=-1)
         train_accuracy = accuracy(outputs, labels)
-
+    
+    
+    
     train_loss = running_loss / len(train_loader)
     train_losses.append(train_loss)
 
@@ -259,7 +300,7 @@ for epoch in range(num_epochs):
             inputs = inputs.to(device).float()
             labels = labels.to(device).long()
             outputs = model(inputs)
-            loss = F.cross_entropy(outputs, labels, weight=class_weight)
+            loss = F.cross_entropy(outputs, labels)
             criterion(outputs, labels)
             val_loss += loss.item()
             outputs = F.softmax(outputs, dim=-1)
@@ -280,7 +321,7 @@ for epoch in range(num_epochs):
 
     test_accuracy = val_accuracy
 
-    scheduler.step(val_loss)
+    #scheduler.step()
     lr_log = f"LR: {optimizer.param_groups[0]['lr']}" # scheduler._last_lr
     print(lr_log)
     logs+=lr_log+'\n'
@@ -313,7 +354,7 @@ for epoch in range(num_epochs):
         plt.close()
 
 
-    if best_test_acc <= test_accuracy and epoch!=0:
+    if best_test_acc <= test_accuracy:
         best_epoch = epoch+1
         log = f"Improve accuracy from {best_test_acc} to {test_accuracy}"
         print(log)
